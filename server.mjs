@@ -1,271 +1,221 @@
-import express from 'express';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
-import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
+// SillyTavern 服务器插件 - 每日使用统计
+const fs = require('fs/promises');
+const path = require('path');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
 
-// --- 配置 ---
-const pluginId = 'daily-usage-tracker';
-const info = {
-    id: 'daily-usage-tracker'
-    name: '每日使用追踪器 (服务器)',
-    description: '记录每日角色/群组聊天时长、消息数和字数 (北京时间)',
-    version: '1.0.0'
-};
-
-// Day.js 配置北京时间
+// 配置 dayjs
 dayjs.extend(utc);
 dayjs.extend(timezone);
-dayjs.extend(isSameOrBefore);
-dayjs.tz.setDefault("Asia/Shanghai");
+dayjs.tz.setDefault('Asia/Shanghai'); // 设置默认时区为北京时间
 
-// 获取当前文件目录
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// 插件信息
+const info = {
+    id: 'daily-usage-tracker',
+    name: '每日使用统计',
+    description: '统计用户每天与不同角色/群组的交互数据'
+};
 
-const dataDir = path.join(__dirname, 'data');
-const CACHE_FLUSH_INTERVAL = 60 * 1000; // 每分钟刷写一次缓存
+// 配置
+const DATA_DIR = path.join(process.cwd(), 'public', 'assets', 'daily-usage-data');
+const CACHE_FLUSH_INTERVAL = 60 * 1000; // 1分钟
 
-// --- 内存缓存与状态 ---
-let dailyStatsCache = {}; // { 'YYYY-MM-DD': { entityId: { stats } } }
+// 内存缓存
+let dailyStatsCache = {};
 let cacheDirty = false;
-let flushIntervalId = null;
+let flushInterval = null;
 
-// --- 辅助函数 ---
-
-/** 获取当前北京日期的 YYYY-MM-DD 字符串 */
+// 获取北京日期字符串 (YYYY-MM-DD)
 function getBeijingDateString() {
-    return dayjs().tz("Asia/Shanghai").format('YYYY-MM-DD');
+    return dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
 }
 
-/** 获取指定日期的数据文件路径 */
+// 获取统计数据文件路径
 function getStatsFilePath(dateString) {
-    return path.join(dataDir, `${dateString}.json`);
+    return path.join(DATA_DIR, `${dateString}.json`);
 }
 
-/**
- * 加载或获取指定日期的统计数据。
- * 会先尝试从内存缓存读取，若无则从文件加载。
- * @param {string} dateString 'YYYY-MM-DD' 格式
- * @returns {Promise<object>} 该日期的统计数据对象，可能为空对象 {}
- */
+// 从缓存或文件加载特定日期的统计数据
 async function loadOrGetStatsForDate(dateString) {
+    // 如果已在缓存中，直接返回
     if (dailyStatsCache[dateString]) {
         return dailyStatsCache[dateString];
     }
 
-    const filePath = getStatsFilePath(dateString);
+    // 尝试从文件加载
     try {
-        const fileContent = await fs.readFile(filePath, 'utf8');
-        const stats = JSON.parse(fileContent);
-        dailyStatsCache[dateString] = stats; // 加载到缓存
-        console.log(`[${info.name}] Loaded stats for ${dateString} from file.`);
-        return stats;
+        const filePath = getStatsFilePath(dateString);
+        const fileData = await fs.readFile(filePath, 'utf8');
+        dailyStatsCache[dateString] = JSON.parse(fileData);
     } catch (error) {
         if (error.code === 'ENOENT') {
-            // 文件不存在，是正常的，返回空对象
-            console.log(`[${info.name}] No stats file found for ${dateString}, starting fresh.`);
-            dailyStatsCache[dateString] = {}; // 初始化缓存
-            return {};
+            // 文件不存在，创建新的空对象
+            dailyStatsCache[dateString] = {};
         } else {
-            console.error(`[${info.name}] Error reading stats file ${filePath}:`, error);
-            return {}; // 出错时返回空对象，避免阻塞
+            console.error(`[${info.name}] 读取统计数据文件失败:`, error);
+            // 发生错误时也创建空对象
+            dailyStatsCache[dateString] = {};
         }
     }
+
+    return dailyStatsCache[dateString];
 }
 
-/**
- * 将脏缓存写入对应的 JSON 文件。
- * @param {boolean} force - 是否强制写入所有日期的缓存（即使没标记为 dirty）
- */
+// 将缓存刷写到磁盘
 async function flushCacheToDisk(force = false) {
-    if (!cacheDirty && !force) {
-        return;
-    }
-
-    console.log(`[${info.name}] Flushing cache to disk (Force: ${force})...`);
-    const datesToFlush = force ? Object.keys(dailyStatsCache) : (cacheDirty ? [getBeijingDateString()] : []); // 强制模式下刷所有，否则只刷当天
-
-    let successCount = 0;
-    let errorCount = 0;
-
-    for (const dateString of datesToFlush) {
-        if (!dailyStatsCache[dateString]) continue; // 跳过不存在的数据
-
-        const filePath = getStatsFilePath(dateString);
-        const dataToWrite = JSON.stringify(dailyStatsCache[dateString], null, 2); // 美化 JSON 输出
-
-        try {
-            await fs.mkdir(dataDir, { recursive: true }); // 确保目录存在
-            await fs.writeFile(filePath, dataToWrite, 'utf8');
-            successCount++;
-        } catch (error) {
-            errorCount++;
-            console.error(`[${info.name}] Error writing stats file ${filePath}:`, error);
-        }
-    }
-
-    if (successCount > 0) {
-       console.log(`[${info.name}] Successfully flushed cache for ${successCount} dates.`);
-    }
-    if (errorCount > 0) {
-        console.error(`[${info.name}] Failed to flush cache for ${errorCount} dates.`);
-    }
-
-
-    cacheDirty = false; // 重置脏标记（即使强制模式也重置，因为已经写入了）
-}
-
-// --- 插件生命周期 ---
-
-/**
- * 初始化函数 (必需)
- * @param {import('express').Router} router - Express 路由器实例
- * @returns {Promise<void>}
- */
-async function init(router) {
-    console.log(`[${info.name}] v${info.version} Initializing...`);
+    if (!cacheDirty && !force) return;
 
     // 确保数据目录存在
     try {
-        await fs.mkdir(dataDir, { recursive: true });
-        console.log(`[${info.name}] Data directory ensured: ${dataDir}`);
+        await fs.mkdir(DATA_DIR, { recursive: true });
     } catch (error) {
-        console.error(`[${info.name}] Failed to create data directory:`, error);
-        return Promise.reject(new Error('Failed to create data directory')); // 初始化失败
+        console.error(`[${info.name}] 创建数据目录失败:`, error);
+        return;
     }
 
-    // 启动定时刷写缓存任务
-    flushIntervalId = setInterval(() => flushCacheToDisk(false), CACHE_FLUSH_INTERVAL);
-    console.log(`[${info.name}] Cache flush interval set to ${CACHE_FLUSH_INTERVAL / 1000} seconds.`);
+    // 保存每个日期的数据到对应文件
+    const savePromises = Object.keys(dailyStatsCache).map(async (dateString) => {
+        const stats = dailyStatsCache[dateString];
+        const filePath = getStatsFilePath(dateString);
+        
+        try {
+            await fs.writeFile(filePath, JSON.stringify(stats, null, 2), 'utf8');
+            console.log(`[${info.name}] 已保存统计数据: ${dateString}`);
+        } catch (error) {
+            console.error(`[${info.name}] 保存统计数据失败 ${dateString}:`, error);
+        }
+    });
 
-    // 使用 express.json() 中间件解析 JSON 请求体
-    // 增加 limit 以防数据量稍大
+    await Promise.all(savePromises);
+    cacheDirty = false;
+}
+
+// 初始化函数
+async function init(router) {
+    console.log(`[${info.name}] 初始化中...`);
+
+    // 确保数据目录存在
+    try {
+        await fs.mkdir(DATA_DIR, { recursive: true });
+    } catch (error) {
+        console.error(`[${info.name}] 创建数据目录失败:`, error);
+    }
+
+    // 设置定时保存缓存
+    flushInterval = setInterval(flushCacheToDisk, CACHE_FLUSH_INTERVAL);
+
+    // 使用Express中间件解析JSON请求体
+    const express = require('express');
     router.use(express.json({ limit: '1mb' }));
 
-    // --- API 路由 ---
-
-    // POST /api/plugins/daily-usage-tracker/track
-    // 接收前端发送的增量追踪数据
+    // 跟踪API - 接收前端发送的数据增量
     router.post('/track', async (req, res) => {
-        const { entityId, timeIncrementMs, messageIncrement, wordIncrement, isUser } = req.body;
-
-        // 基本验证
-        if (!entityId) {
-            return res.status(400).json({ error: 'Missing entityId' });
-        }
-        if (timeIncrementMs === undefined && messageIncrement === undefined) {
-             return res.status(400).json({ error: 'No tracking data provided (time or message)' });
-        }
-
         try {
-            const dateString = getBeijingDateString();
-            const dailyStats = await loadOrGetStatsForDate(dateString);
+            const { entityId, timeIncrementMs, messageIncrement, wordIncrement, isUser } = req.body;
 
-            // 初始化该实体的统计对象（如果当天首次出现）
-            if (!dailyStats[entityId]) {
-                dailyStats[entityId] = {
+            if (!entityId) {
+                return res.status(400).json({ error: '缺少必要参数 entityId' });
+            }
+
+            // 获取当前北京日期
+            const dateString = getBeijingDateString();
+            
+            // 加载或获取当天的统计数据
+            const stats = await loadOrGetStatsForDate(dateString);
+            
+            // 如果实体不存在，初始化其数据
+            if (!stats[entityId]) {
+                stats[entityId] = {
                     totalTimeMs: 0,
                     userMsgCount: 0,
                     aiMsgCount: 0,
                     userWordCount: 0,
-                    aiWordCount: 0,
+                    aiWordCount: 0
                 };
             }
-            const entityStats = dailyStats[entityId];
 
-            // 累加数据
-            if (typeof timeIncrementMs === 'number' && timeIncrementMs > 0) {
-                entityStats.totalTimeMs += timeIncrementMs;
+            // 更新活跃时间（如果提供）
+            if (timeIncrementMs && timeIncrementMs > 0) {
+                stats[entityId].totalTimeMs += timeIncrementMs;
             }
-            if (typeof messageIncrement === 'number' && messageIncrement > 0) {
+
+            // 更新消息计数（如果提供）
+            if (messageIncrement && messageIncrement > 0) {
                 if (isUser) {
-                    entityStats.userMsgCount += messageIncrement;
-                    if (typeof wordIncrement === 'number' && wordIncrement >= 0) {
-                        entityStats.userWordCount += wordIncrement;
-                    }
+                    stats[entityId].userMsgCount += messageIncrement;
                 } else {
-                    entityStats.aiMsgCount += messageIncrement;
-                    if (typeof wordIncrement === 'number' && wordIncrement >= 0) {
-                        entityStats.aiWordCount += wordIncrement;
-                    }
+                    stats[entityId].aiMsgCount += messageIncrement;
                 }
             }
 
-            cacheDirty = true; // 标记缓存已更改
-            // console.debug(`[${info.name}] Tracked data for ${entityId} on ${dateString}:`, req.body); // 调试日志
-            res.status(200).json({ success: true });
+            // 更新字数计数（如果提供）
+            if (wordIncrement && wordIncrement > 0) {
+                if (isUser) {
+                    stats[entityId].userWordCount += wordIncrement;
+                } else {
+                    stats[entityId].aiWordCount += wordIncrement;
+                }
+            }
 
+            // 标记缓存为脏
+            cacheDirty = true;
+
+            res.status(200).json({ success: true });
         } catch (error) {
-            console.error(`[${info.name}] Error processing /track request:`, error);
-            res.status(500).json({ error: 'Internal server error while tracking data' });
+            console.error(`[${info.name}] 处理跟踪数据失败:`, error);
+            res.status(500).json({ error: '处理跟踪数据失败' });
         }
     });
 
-    // GET /api/plugins/daily-usage-tracker/stats?date=YYYY-MM-DD
-    // 获取指定日期的统计数据
+    // 统计API - 获取特定日期的统计数据
     router.get('/stats', async (req, res) => {
-        let dateString = req.query.date;
-
-        // 如果没有提供日期，则默认为当天北京日期
-        if (!dateString) {
-            dateString = getBeijingDateString();
-        } else {
-            // 验证日期格式
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-                return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
-            }
-            // 验证是否是未来日期 (基于北京时间)
-            const requestedDate = dayjs(dateString).tz("Asia/Shanghai");
-            const today = dayjs().tz("Asia/Shanghai").endOf('day'); // 今天结束时间
-            if (requestedDate.isAfter(today)) {
-                return res.status(400).json({ error: 'Cannot request stats for a future date.' });
-            }
-        }
-
         try {
-            // 先尝试强制刷写当天缓存，确保文件是最新的（如果用户在查询前刚操作过）
-            if(dateString === getBeijingDateString()){
-                await flushCacheToDisk(false); // 只刷写当天的脏缓存
+            // 获取查询参数中的日期，默认为当天
+            const dateString = req.query.date || getBeijingDateString();
+            
+            // 验证日期格式 (简单检查)
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+                return res.status(400).json({ error: '无效的日期格式，应为 YYYY-MM-DD' });
             }
 
-            // 从缓存或文件加载数据
+            // 检查是否为未来日期
+            if (dayjs(dateString).isAfter(dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD'))) {
+                return res.status(400).json({ error: '不能查询未来日期的统计数据' });
+            }
+
+            // 加载统计数据
             const stats = await loadOrGetStatsForDate(dateString);
             res.status(200).json(stats);
         } catch (error) {
-            console.error(`[${info.name}] Error processing /stats request for date ${dateString}:`, error);
-            res.status(500).json({ error: `Internal server error while fetching stats for ${dateString}` });
+            console.error(`[${info.name}] 获取统计数据失败:`, error);
+            res.status(500).json({ error: '获取统计数据失败' });
         }
     });
 
-    console.log(`[${info.name}] Initialization complete. API endpoints registered.`);
-    return Promise.resolve(); // 初始化成功
+    console.log(`[${info.name}] 初始化完成`);
+    return Promise.resolve();
 }
 
-/**
- * 退出函数 (可选)
- * @returns {Promise<void>}
- */
+// 退出函数
 async function exit() {
-    console.log(`[${info.name}] Exiting...`);
-    if (flushIntervalId) {
-        clearInterval(flushIntervalId);
-        console.log(`[${info.name}] Cache flush interval cleared.`);
+    console.log(`[${info.name}] 正在退出...`);
+    
+    // 清除定时器
+    if (flushInterval) {
+        clearInterval(flushInterval);
+        flushInterval = null;
     }
-    // 在退出前强制刷写所有脏缓存
-    try {
-        await flushCacheToDisk(true); // 强制写入所有缓存
-        console.log(`[${info.name}] Final cache flush complete.`);
-    } catch (error) {
-        console.error(`[${info.name}] Error during final cache flush:`, error);
-        return Promise.reject(error); // 退出失败
-    }
-    console.log(`[${info.name}] Exit complete.`);
-    return Promise.resolve(); // 退出成功
+
+    // 强制刷写缓存
+    await flushCacheToDisk(true);
+    
+    console.log(`[${info.name}] 退出完成`);
+    return Promise.resolve();
 }
 
-// 导出必需的部分
-export { info, init, exit };
+module.exports = {
+    info,
+    init,
+    exit
+};
