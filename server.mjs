@@ -10,7 +10,7 @@ import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
 // --- 配置 ---
 const pluginId = 'daily-usage-tracker';
 const info = {
-    id: pluginId,
+    id: 'daily-usage-tracker'
     name: '每日使用追踪器 (服务器)',
     description: '记录每日角色/群组聊天时长、消息数和字数 (北京时间)',
     version: '1.0.0'
