@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 // --- 配置 ---
-const pluginId = 'time-UI-1; // *** 必须与前端使用的 ID 一致 ***
+const pluginId = 'daily-usage-tracker'; // *** 必须与前端使用的 ID 一致 ***
 const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data');
 const writeInterval = 5 * 60 * 1000; // 5 分钟写入一次磁盘 (毫秒)
 
