@@ -1,5 +1,5 @@
 {
-  "name": "sillytavern-daily-usage-tracker-server",
+  "name": "time-sever-1",
   "version": "1.0.0",
   "description": "Server backend for Daily Usage Tracker plugin.",
   "type": "module",
