@@ -184,7 +184,7 @@ async function exit() {
 }
 
 const info = {
-    id: pluginId,
+    id: 'daily-usage-tracker',
     name: '聊天统计插件 (优化版)',
     description: '统计每日聊天数据，优化了写入性能。',
 };
